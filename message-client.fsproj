@@ -1,0 +1,16 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <OutputType>Exe</OutputType>
+        <TargetFramework>net6.0</TargetFramework>
+        <RootNamespace>message_client</RootNamespace>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <Compile Include="Parser.fs" />
+        <Compile Include="Interpreter.fs" />
+        <Content Include="message-client.psa" />
+        <Compile Include="Program.fs" />
+    </ItemGroup>
+
+</Project>

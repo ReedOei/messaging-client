@@ -1,0 +1,46 @@
+actor Formatter receives list any {
+    var outStream : stream
+    var formatStr : string
+    
+    event ReceiveArgs on {
+        input --> [var time, var msgText]
+    } do {
+        format(formatStr, time, msgText) --> outStream
+        this --> consume
+    }
+}
+
+actor Client {
+    var serverStream : stream
+    var messageLog : list list any
+    var mode : string
+    
+    var typing : string
+
+    event ReceiveText on {
+        serverStream --> lines --[ |4| ]-> ["text", var time, var name, var text]
+    } do {
+        (name + ": " + text) --> stdout
+        [time, name, text] --> this.messageLog
+    }
+    
+    event KeyPress on {
+        stdin --[ ! ]-> var key
+    } and then {
+        on { this.mode = "normal" } and then {
+            on { key =/= "<Enter>" } do { key --> this.typing }
+            on { key = "Enter" } do { this.typing --> this.sendMessage }
+        }
+        
+        on { true } do { "I don't know what to do!" --> stdout }
+    }
+    
+    transformer sendMessage(toSend : string) {
+        start Formatter(serverStream, "text(%d, "\\\"%s\\\"") --> var formatter
+        clock --[ ! ]-> formatter
+        text --> escapeString --> formatter
+    }
+}
+
+start Client(new SocketStream("localhost", 8080), stdout, [], "normal", "")
+    
