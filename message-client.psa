@@ -5,7 +5,7 @@ actor Formatter receives list any {
     event ReceiveArgs on {
         input --> [var time, var msgText]
     } do {
-        format(formatStr, time, msgText) --> outStream
+        format(formatStr, time, msgText) --> this.outStream
         this --> consume
     }
 }
@@ -18,7 +18,7 @@ actor Client {
     var typing : string
 
     event ReceiveText on {
-        serverStream --> lines --[ |4| ]-> ["text", var time, var name, var text]
+        serverStream --> lines --[ |4| ]-> [unify("text"), var time, var name, var text]
     } do {
         (name + ": " + text) --> stdout
         [time, name, text] --> this.messageLog
@@ -27,12 +27,12 @@ actor Client {
     event KeyPress on {
         stdin --[ ! ]-> var key
     } and then {
-        on { this.mode = "normal" } and then {
-            on { key =/= "<Enter>" } do { key --> this.typing }
-            on { key = "Enter" } do { this.typing --> this.sendMessage }
+        event on { this.mode --> unify("normal") } and then {
+            event on { key --> unify("<Enter>") } do { this.typing --> this.sendMessage }
+            event on { } do { key --> this.typing }
         }
         
-        on { true } do { "I don't know what to do!" --> stdout }
+        event on { } do { "I don't know what to do!" --> stdout }
     }
     
     transformer sendMessage(toSend : string) {

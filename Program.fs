@@ -82,18 +82,17 @@ let ReceiveInfos (socket : Socket) = seq {
             linesIt.Current |> printfn "%s"
 }
 
-printfn "%A" (Parser.program "5 --> var x\n\
-                              \"te\\\"st\" --> var s")
-printfn "%A" (Parser.program "event KeyPress on { stdin --> var x } do { \"te\\\"st\" --> var s }")
-printfn "%A" (Parser.program "[1,2] --> var list")
-printfn "%A" (Parser.program "[stdout] --> var list")
-printfn "%A" (Parser.program "[] --> var list")
-printfn "%A" (Parser.program "copy(list) --> this")
-printfn "%A" (Parser.program "format(s, x, y) --> this")
-printfn "%A" (Parser.program "format(s) --> this")
-printfn "%A" (Parser.program "format(s, x) --> this")
-printfn "%A" (Parser.program "event ReceiveArgs on { input --> [var time, var msgText] } do { 5 --> var x }")
-printfn "%A" (Parser.actor "actor Formatter { var outStream : stream }")
+//printfn "%A" (Parser.program "5 --> var x\n\
+//                              \"te\\\"st\" --> var s")
+//printfn "%A" (Parser.program "event KeyPress on { stdin --> var x } do { \"te\\\"st\" --> var s }")
+//printfn "%A" (Parser.program "[1,2] --> var list")
+//printfn "%A" (Parser.program "[stdout] --> var list")
+//printfn "%A" (Parser.program "[] --> var list")
+//printfn "%A" (Parser.program "copy(list) --> this")
+//printfn "%A" (Parser.program "format(s, x, y) --> this")
+//printfn "%A" (Parser.program "format(s) --> this")
+//printfn "%A" (Parser.program "event ReceiveArgs on { input --> [var time, var msgText] } do { 5 --> var x }")
+//printfn "%A" (Parser.actor "actor Formatter { var outStream : stream }")
 printfn "%A" (Parser.program
 "actor Formatter receives list any {\n\
     var outStream : stream\n\
@@ -102,7 +101,14 @@ printfn "%A" (Parser.program
     event ReceiveArgs on {\n\
         input --> [var time, var msgText]\n\
     } do {\n\
-        format(formatStr, time, msgText) --> outStream\n\
+        format(formatStr, time, msgText) --> this.outStream\n\
         this --> consume\n\
     }\n\
 }")
+
+match Parser.program "5 --> var x" with
+| Some (leftover, program) when leftover = "" ->
+    let state = Interpreter.State()
+    Interpreter.evaluate state program
+    printfn "%A" (state.ToString())
+| x -> printfn "Error"

@@ -128,45 +128,6 @@ let sepBy1 (p : Parser<'a>) (sep : Parser<'b>) : Parser<seq<'a>> = parser {
     return Seq.append (Seq.singleton head) values
 }
 
-type PsaType =
-    | PsaInt
-    | PsaNat
-    | PsaStr
-    | PsaBool
-    | PsaStream
-    | PsaList of PsaType
-    | PsaAny
-
-type Locator =
-    | Consume
-    | Stdin
-    | Stdout
-    | This
-    | VarDef of string
-    | VarDefTyped of string * PsaType
-    | VarRef of string
-    | IntLit of int
-    | StrLit of string
-    | Copy of Locator
-    | Format of Locator * list<Locator>
-    | LocatorList of list<Locator>
-    | FieldAccess of Locator * string 
-    
-type Flow =
-    | SimpleFlow of Locator * Locator
-
-type Statement =
-    | Actor of string * list<Statement>
-    | ReceivingActor of string * PsaType * list<Statement>
-    | Transformer of string * list<Locator> * list<Statement>
-    | FlowStmt of Flow
-    | FieldDefTyped of string * PsaType
-    | FieldDef of string 
-    | SimpleEvent of string * list<Statement> * list<Statement>
-    | ChainedEvent of string * list<Statement> * list<Statement>
-
-type Program = list<Statement>
-
 // Modified from: https://stackoverflow.com/a/24106749
 let escape : Parser<string> = parser {
     let! d = char '\\'
@@ -196,6 +157,49 @@ let anyChar : Parser<char> = fun s ->
         None
     else
         Some (s.Substring(1), s[0])
+
+type PsaType =
+    | PsaInt
+    | PsaNat
+    | PsaStr
+    | PsaBool
+    | PsaStream
+    | PsaList of PsaType
+    | PsaAny
+
+type Locator =
+    | Uninitialized
+    | Consume
+    | Stdin
+    | Stdout
+    | This
+    | VarDef of string
+    | VarDefTyped of string * PsaType
+    | VarRef of string
+    | IntLit of int
+    | NatLit of int
+    | StrLit of string
+    | BoolLit of bool
+    | Copy of Locator
+    | Unify of Locator
+    | Combine of Locator * Locator
+    | Format of Locator * list<Locator>
+    | LocatorList of list<Locator>
+    | LocatorStream of list<Locator>
+    | FieldAccess of Locator * string 
+    
+type Flow =
+    | SimpleFlow of Locator * Locator
+
+type Statement =
+    | Actor of string * list<Statement>
+    | ReceivingActor of string * PsaType * list<Statement>
+    | Transformer of string * list<Locator> * list<Statement>
+    | FlowStmt of Flow
+    | FieldDefTyped of string * PsaType
+    | FieldDef of string 
+    | SimpleEvent of string * list<Statement> * list<Statement>
+    | ChainedEvent of string * list<Statement> * list<Statement>
 
 let symbolName : Parser<string> =
     some (oneOf "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_") |>>= charSeqToString
@@ -247,6 +251,14 @@ let copyLoc = parser {
     let! _ = symbol (char ')')
     return Copy arg
 }
+
+let unifyLoc = parser {
+    let! _ = symbol (string "unify")
+    let! _ = symbol (char '(')
+    let! arg = locator
+    let! _ = symbol (char ')')
+    return Copy arg
+}
     
 let formatLoc = parser {
     let! _ = symbol (string "format")
@@ -256,7 +268,22 @@ let formatLoc = parser {
     return Format (args.Head, args.Tail) // Safe because of the use of sepBy1
 }
 
-let locator : Parser<Locator> =
+let parenLoc : Parser<Locator> = parser {
+    let! _ = symbol (char '(')
+    let! inner = locator
+    let! _ = symbol (char ')')
+    return inner
+}
+
+let numLit : Parser<Locator> = parser {
+    let! n = symbol integer
+    if n < 0 then
+        return IntLit n
+    else
+        return NatLit n
+}
+
+let basicLocator : Parser<Locator> =
     (symbol (string "consume") |>> Consume)
     <|> (symbol (string "stdin") |>> Stdin)
     <|> (symbol (string "stdout") |>> Stdout)
@@ -265,11 +292,31 @@ let locator : Parser<Locator> =
     <|> copyLoc
     <|> varDefWithType
     <|> varDefNoType
-    <|> (symbol integer |>>= IntLit)
+    <|> numLit
     <|> (symbol escapedStr |>>= StrLit)
     <|> locatorList
     <|> formatLoc
     <|> varRef
+    <|> parenLoc
+    
+let fieldAccess : Parser<Locator> = parser {
+    let! receiver = basicLocator
+    let! _ = symbol (char '.')
+    let! fieldName = symbolName
+    return FieldAccess (receiver, fieldName)
+}
+
+let combineLoc : Parser<Locator> = parser {
+    let! a = basicLocator
+    let! _ = symbol (char '+')
+    let! b = locator
+    return Combine (a, b)
+}
+    
+let locator : Parser<Locator> =
+    fieldAccess
+    <|> basicLocator
+    <|> combineLoc
     
 let flow : Parser<Flow> = parser {
     let! src = locator
@@ -281,7 +328,7 @@ let flow : Parser<Flow> = parser {
 
 let simpleEvent : Parser<Statement> = parser {
     let! _ = symbol (string "event")
-    let! eventName = symbolName
+    let! eventName = optional symbolName
     let! _ = symbol (string "on")
     let! _ = newlineSymbol (char '{') 
     let! guard = many statement
@@ -290,12 +337,12 @@ let simpleEvent : Parser<Statement> = parser {
     let! _ = newlineSymbol (char '{') 
     let! body = many statement
     let! _ = newlineSymbol (char '}') 
-    return SimpleEvent (eventName, List.ofSeq guard, List.ofSeq body)
+    return SimpleEvent (Option.defaultValue "" eventName, List.ofSeq guard, List.ofSeq body)
 }
 
 let chainedEvent : Parser<Statement> = parser {
     let! _ = symbol (string "event")
-    let! eventName = symbolName
+    let! eventName = optional symbolName
     let! _ = symbol (string "on")
     let! _ = newlineSymbol (char '{') 
     let! guard = many statement
@@ -305,7 +352,7 @@ let chainedEvent : Parser<Statement> = parser {
     let! _ = newlineSymbol (char '{') 
     let! childEvents = many event
     let! _ = newlineSymbol (char '}') 
-    return ChainedEvent (eventName, List.ofSeq guard, List.ofSeq childEvents)
+    return ChainedEvent (Option.defaultValue "" eventName, List.ofSeq guard, List.ofSeq childEvents)
 }
 
 let event = simpleEvent <|> chainedEvent
@@ -347,5 +394,5 @@ let statement : Parser<Statement> =
 let program = parser {
     let! _ = newlines
     let! stmts = many statement
-    return stmts
+    return List.ofSeq stmts
 }
