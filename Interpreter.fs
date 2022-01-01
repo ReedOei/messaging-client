@@ -258,6 +258,7 @@ let resolveSrc (s : State) (f : Locator -> Locator) (loc : Locator) : Locator =
     | Select (loc, sel) ->
         let toTake = resolveSrc s (fun _ -> Nothing) sel
         resolveSrc s (fun _ -> toTake) loc
+    | Copy (VarRef name) -> s.lookup(name)
     | IntLit n -> IntLit n
     | NatLit n -> NatLit n
     | StrLit s -> StrLit s

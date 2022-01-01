@@ -42,5 +42,6 @@ actor Client {
     }
 }
 
-start Client(new SocketStream("localhost", 8080), stdout, [], "normal", "")
+["localhost", 8080] --> start SocketStream --> var serverStream
+[serverStream, stdout, [], "normal", ""] --> start Client --> var client
     
