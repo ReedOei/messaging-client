@@ -1,0 +1,15 @@
+actor Naturals receives nat {
+    var current : nat
+    
+    event Next on {
+        input --[ 1 ]-> current
+    } do {
+        copy(current) --> output
+    }
+}
+
+5 --> var x
+
+[0] --> start Naturals --> var nats : Naturals
+
+10 --> nats --> var result : list nat

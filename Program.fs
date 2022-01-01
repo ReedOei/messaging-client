@@ -95,20 +95,20 @@ let ReceiveInfos (socket : Socket) = seq {
 //printfn "%A" (Parser.actor "actor Formatter { var outStream : stream }")
 printfn "%A" (Parser.program
 "actor Formatter receives list any {\n\
-    var outStream : stream\n\
     var formatStr : string\n\
     
     event ReceiveArgs on {\n\
         input --> [var time, var msgText]\n\
     } do {\n\
-        format(formatStr, time, msgText) --> this.outStream\n\
+        format(formatStr, time, msgText) --> output\n\
         this --> consume\n\
     }\n\
 }")
 
-match Parser.program "5 --> var x" with
+match Parser.program (System.IO.File.ReadAllText "test.psa") with
 | Some (leftover, program) when leftover = "" ->
+    printfn "Program: %A" program
     let state = Interpreter.State()
     Interpreter.evaluate state program
-    printfn "%A" (state.ToString())
+    printfn "State: %A" (state.ToString())
 | x -> printfn "Error"

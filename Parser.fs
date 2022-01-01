@@ -85,7 +85,7 @@ let symbol (p : Parser<'a>) : Parser<'a> = parser {
     let! _ = many ws
     return value
 }
-let wsNewline = ws <|> char '\n'
+let wsNewline = ws <|> char '\n' <|> char '\r'
 let newlineSymbol (p : Parser<'a>) : Parser<'a> = parser {
     let! _ = many wsNewline
     let! value = p
@@ -166,13 +166,16 @@ type PsaType =
     | PsaStream
     | PsaList of PsaType
     | PsaAny
+    | ActorType of string
 
 type Locator =
     | Uninitialized
+    | Nothing
     | Consume
     | Stdin
     | Stdout
     | This
+    | ActorVal of string * Map<string, Locator>
     | VarDef of string
     | VarDefTyped of string * PsaType
     | VarRef of string
@@ -186,14 +189,20 @@ type Locator =
     | Format of Locator * list<Locator>
     | LocatorList of list<Locator>
     | LocatorStream of list<Locator>
-    | FieldAccess of Locator * string 
+    | FieldAccess of Locator * string
+    | Select of Locator * Locator
+    
+type Transformer =
+    | Start of string
+    | TransformerCall of string * Locator list
+    | ChainedLoc of Locator
     
 type Flow =
     | SimpleFlow of Locator * Locator
+    | TransformerFlow of Locator * Transformer * Locator
 
 type Statement =
-    | Actor of string * list<Statement>
-    | ReceivingActor of string * PsaType * list<Statement>
+    | Actor of string * PsaType * PsaType * list<Statement>
     | Transformer of string * list<Locator> * list<Statement>
     | FlowStmt of Flow
     | FieldDefTyped of string * PsaType
@@ -243,6 +252,7 @@ let psaType : Parser<PsaType> =
     <|> (symbol (string "stream") |>> PsaStream)
     <|> (symbol (string "any") |>> PsaAny)
     <|> psaList
+    <|> (symbolName |>>= ActorType)
     
 let copyLoc = parser {
     let! _ = symbol (string "copy")
@@ -283,6 +293,30 @@ let numLit : Parser<Locator> = parser {
         return NatLit n
 }
 
+let startActor : Parser<Transformer> = parser {
+    let! _ = symbol (string "start")
+    let! actorName = symbolName
+    return Start actorName
+}
+
+let transformerCall : Parser<Transformer> = parser {
+    let! name = symbolName
+    let! _ = symbol (char '(')
+    let! args = sepBy1 locator (symbol (char ',')) |>>= List.ofSeq
+    let! _ = symbol (char ')')
+    return TransformerCall (name, args)
+}
+
+let chainedLoc : Parser<Transformer> = parser {
+    let! loc = locator
+    return ChainedLoc loc
+}
+
+let transformer : Parser<Transformer> =
+    startActor
+    <|> transformerCall
+    <|> chainedLoc
+
 let basicLocator : Parser<Locator> =
     (symbol (string "consume") |>> Consume)
     <|> (symbol (string "stdin") |>> Stdin)
@@ -298,6 +332,14 @@ let basicLocator : Parser<Locator> =
     <|> formatLoc
     <|> varRef
     <|> parenLoc
+
+let filterLoc : Parser<Locator> = parser {
+    let! loc = basicLocator
+    let! _ = symbol (char '[')
+    let! filter = locator
+    let! _ = symbol (char ']')
+    return Select (loc, filter)
+}
     
 let fieldAccess : Parser<Locator> = parser {
     let! receiver = basicLocator
@@ -317,14 +359,43 @@ let locator : Parser<Locator> =
     fieldAccess
     <|> basicLocator
     <|> combineLoc
+    <|> filterLoc
     
-let flow : Parser<Flow> = parser {
+let simpleFlow : Parser<Flow> = parser {
     let! src = locator
     let! _ = symbol (string "-->")
     let! dst = locator
     let! _ = newlines
     return SimpleFlow (src, dst)
 }
+
+let filterFlow : Parser<Flow> = parser {
+    let! src = locator
+    let! _ = symbol (string "--[")
+    let! filter = locator
+    let! _ = symbol (string "]->" <|> string "]-->")
+    let! dst = locator
+    let! _ = newlines
+    return SimpleFlow (Select (src, filter), dst)
+}
+
+let basicFlow : Parser<Flow> =
+    simpleFlow
+    <|> filterFlow
+    
+let transformerFlow : Parser<Flow> = parser {
+    let! src = locator
+    let! _ = symbol (string "-->")
+    let! trans = transformer
+    let! _ = symbol (string "-->")
+    let! dst = locator
+    let! _ = newlines
+    return TransformerFlow (src, trans, dst)
+}
+    
+let flow : Parser<Flow> =
+    transformerFlow
+    <|> basicFlow
 
 let simpleEvent : Parser<Statement> = parser {
     let! _ = symbol (string "event")
@@ -363,7 +434,7 @@ let actor : Parser<Statement> = parser {
     let! _ = newlineSymbol (char '{') 
     let! members = many statement
     let! _ = newlineSymbol (char '}') 
-    return Actor (actorName, List.ofSeq members)
+    return Actor (actorName, PsaList PsaAny, PsaList PsaAny, List.ofSeq members)
 }
 
 let receivingActor : Parser<Statement> = parser {
@@ -374,7 +445,7 @@ let receivingActor : Parser<Statement> = parser {
     let! _ = newlineSymbol (char '{') 
     let! members = many statement
     let! _ = newlineSymbol (char '}') 
-    return ReceivingActor (actorName, recvType, List.ofSeq members)
+    return Actor (actorName, recvType, PsaList PsaAny, List.ofSeq members)
 }
 
 let toFieldDef (vdef : Locator) : Statement =

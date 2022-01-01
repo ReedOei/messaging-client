@@ -11,6 +11,7 @@
         <Compile Include="Interpreter.fs" />
         <Content Include="message-client.psa" />
         <Compile Include="Program.fs" />
+        <Content Include="test.psa" />
     </ItemGroup>
 
 </Project>
