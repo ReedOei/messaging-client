@@ -130,9 +130,18 @@ let sepBy1 (p : Parser<'a>) (sep : Parser<'b>) : Parser<seq<'a>> = parser {
 
 // Modified from: https://stackoverflow.com/a/24106749
 let escape : Parser<string> = parser {
-    let! d = char '\\'
-    let! c = oneOf "\\\"0rnt"
-    return d.ToString() + c.ToString()
+    let! _ = char '\\'
+    let! c = oneOf "\\\"rnt"
+    if c = '\\' then
+        return "\\"
+    else if c = '"' then
+        return "\""
+    else if c = 'n' then
+        return "\n"
+    else if c = '\r' then
+        return "\r"
+    else 
+        return "\t"
 }
 let nonescape : Parser<string> = noneOf "\\\"" |>>= fun c -> c.ToString()
 
@@ -167,6 +176,12 @@ type PsaType =
     | PsaList of PsaType
     | PsaAny
     | ActorType of string
+    
+type TypeQuant =
+    | Nonempty
+    | AnyQuant
+    | Exactly of Locator
+    | Every
 
 type Locator =
     | Uninitialized
@@ -191,6 +206,7 @@ type Locator =
     | LocatorStream of list<Locator>
     | FieldAccess of Locator * string
     | Select of Locator * Locator
+    | SelectQuant of Locator * TypeQuant
     
 type Transformer =
     | Start of string
@@ -267,7 +283,7 @@ let unifyLoc = parser {
     let! _ = symbol (char '(')
     let! arg = locator
     let! _ = symbol (char ')')
-    return Copy arg
+    return Unify arg
 }
     
 let formatLoc = parser {
@@ -324,6 +340,7 @@ let basicLocator : Parser<Locator> =
     <|> (symbol (string "this") |>> This)
     <|> formatLoc
     <|> copyLoc
+    <|> unifyLoc
     <|> varDefWithType
     <|> varDefNoType
     <|> numLit
@@ -333,12 +350,37 @@ let basicLocator : Parser<Locator> =
     <|> varRef
     <|> parenLoc
 
-let filterLoc : Parser<Locator> = parser {
+let exactlyQuant : Parser<TypeQuant> = parser {
+    let! _ = symbol (char '|')
+    let! n = integer
+    let! _ = symbol (char '|')
+    return Exactly (NatLit n)
+}
+    
+let typeQuant : Parser<TypeQuant> =
+    (symbol (string "nonempty") |>> Nonempty)
+    <|> (symbol (string "+") |>> Nonempty)
+    <|> (symbol (string "any") |>> AnyQuant)
+    <|> (symbol (string "*") |>> AnyQuant)
+    <|> (symbol (string "every") |>> Every)
+    <|> (symbol (string "empty") |>> Exactly (NatLit 0))
+    <|> (symbol (string "!") |>> Exactly (NatLit 1))
+    <|> exactlyQuant
+
+let selectLoc : Parser<Locator> = parser {
     let! loc = basicLocator
     let! _ = symbol (char '[')
     let! filter = locator
     let! _ = symbol (char ']')
     return Select (loc, filter)
+}
+
+let selectQuant : Parser<Locator> = parser {
+    let! loc = basicLocator
+    let! _ = symbol (char '[')
+    let! quant = typeQuant
+    let! _ = symbol (char ']')
+    return SelectQuant (loc, quant)
 }
     
 let fieldAccess : Parser<Locator> = parser {
@@ -359,7 +401,8 @@ let locator : Parser<Locator> =
     fieldAccess
     <|> basicLocator
     <|> combineLoc
-    <|> filterLoc
+    <|> selectLoc
+    <|> selectQuant
     
 let simpleFlow : Parser<Flow> = parser {
     let! src = locator
@@ -369,7 +412,7 @@ let simpleFlow : Parser<Flow> = parser {
     return SimpleFlow (src, dst)
 }
 
-let filterFlow : Parser<Flow> = parser {
+let selectLocFlow : Parser<Flow> = parser {
     let! src = locator
     let! _ = symbol (string "--[")
     let! filter = locator
@@ -379,9 +422,20 @@ let filterFlow : Parser<Flow> = parser {
     return SimpleFlow (Select (src, filter), dst)
 }
 
+let selectQuantFlow : Parser<Flow> = parser {
+    let! src = locator
+    let! _ = symbol (string "--[")
+    let! quant = typeQuant
+    let! _ = symbol (string "]->" <|> string "]-->")
+    let! dst = locator
+    let! _ = newlines
+    return SimpleFlow (SelectQuant (src, quant), dst)
+}
+
 let basicFlow : Parser<Flow> =
     simpleFlow
-    <|> filterFlow
+    <|> selectLocFlow
+    <|> selectQuantFlow
     
 let transformerFlow : Parser<Flow> = parser {
     let! src = locator
@@ -400,7 +454,13 @@ let flow : Parser<Flow> =
 let simpleEvent : Parser<Statement> = parser {
     let! _ = symbol (string "event")
     let! eventName = optional symbolName
-    let! _ = symbol (string "on")
+    let! eventName = parser {
+                 if eventName = Some "on" then
+                    return None
+                else
+                    let! _ = symbol (string "on")
+                    return eventName
+            }
     let! _ = newlineSymbol (char '{') 
     let! guard = many statement
     let! _ = newlineSymbol (char '}') 
@@ -414,7 +474,13 @@ let simpleEvent : Parser<Statement> = parser {
 let chainedEvent : Parser<Statement> = parser {
     let! _ = symbol (string "event")
     let! eventName = optional symbolName
-    let! _ = symbol (string "on")
+    let! eventName = parser {
+                 if eventName = Some "on" then
+                    return None
+                else
+                    let! _ = symbol (string "on")
+                    return eventName
+            }
     let! _ = newlineSymbol (char '{') 
     let! guard = many statement
     let! _ = newlineSymbol (char '}') 
@@ -448,6 +514,19 @@ let receivingActor : Parser<Statement> = parser {
     return Actor (actorName, recvType, PsaList PsaAny, List.ofSeq members)
 }
 
+let receiveEmitActor : Parser<Statement> = parser {
+    let! _ = symbol (string "actor")
+    let! actorName = symbolName
+    let! _ = symbol (string "receives")
+    let! recvType = psaType
+    let! _ = symbol (string "emits")
+    let! emitType = psaType
+    let! _ = newlineSymbol (char '{') 
+    let! members = many statement
+    let! _ = newlineSymbol (char '}') 
+    return Actor (actorName, recvType, emitType, List.ofSeq members)
+}
+
 let toFieldDef (vdef : Locator) : Statement =
     match vdef with
     | VarDef name -> FieldDef name
@@ -461,6 +540,7 @@ let statement : Parser<Statement> =
     <|> event
     <|> actor
     <|> receivingActor
+    <|> receiveEmitActor
 
 let program = parser {
     let! _ = newlines

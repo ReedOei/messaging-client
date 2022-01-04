@@ -1,6 +1,7 @@
 module rec Interpreter
 
 open System
+open System.Threading
 open Microsoft.FSharp.Collections
 open Parser
 
@@ -75,6 +76,12 @@ let vars (loc : Locator) : string list =
     | LocatorStream vals -> concatMap vars vals
     | FieldAccess (loc, _) -> vars loc
     | Select (src, filter) -> vars src @ vars filter
+    | SelectQuant (src, quant) -> vars src @ varsQuant quant
+    
+let varsQuant (q : TypeQuant) : string list =
+    match q with
+    | Exactly loc -> vars loc
+    | _ -> []
     
 let toFlow (stmt : Statement) : Flow list =
     match stmt with
@@ -90,6 +97,10 @@ let eventSources (stmt : Statement) : string list =
     concatMap (vars << flowSrc) triggerFlows 
 
 exception FlowException of string
+
+type TriggeredEvent =
+    | TriggeredEvent of string * string
+    | TriggeredEventInState of string * string
 
 type ActorType(actorType : Statement) =
     let events : Map<string, Statement> =
@@ -122,40 +133,52 @@ type ActorType(actorType : Statement) =
         
     member this.trigger(s : State, fieldName : string) =
         for e in Option.defaultValue [] (sourceToEvents.TryFind(fieldName)) do
-            match e with
-            | SimpleEvent (_, trigger, body) ->
-                try
-                    evaluate s trigger
-                    evaluate s body
-                with
-                | FlowException _ -> ()
-            | x -> failwith $"Unsupported: {x}"
+            evaluateEvent s e |> ignore
         
     member this.trigger(s : State, fieldName : string, newStore : Map<string, Locator>) : Map<string, Locator> =
         let mutable resultStore = newStore
         for e in Option.defaultValue [] (sourceToEvents.TryFind(fieldName)) do
-            match e with
-            | SimpleEvent (_, trigger, body) ->
-                let oldStore = s.getStore()
-                s.setStore(resultStore)
+            let oldStore = s.getStore()
+            s.setStore(resultStore)
+            
+            evaluateEvent s e |> ignore
                 
-                try
-                    evaluate s trigger
-                    evaluate s body
-                with
-                | FlowException _ -> ()
-                
-                resultStore <- s.getStore()
-                s.setStore(oldStore)
-            | x -> failwith $"Unsupported: {x}"
+            resultStore <- s.getStore()
+            s.setStore(oldStore)
         resultStore
+        
+let isActorVal (loc : Locator) : bool =
+    match loc with
+    | ActorVal _ -> true
+    | _ -> false
 
 type State() =
     let mutable store : Map<string, Locator> = Map.empty
     let mutable actorTypes : Map<string, ActorType> = Map.empty
+    let mutable eventQueue : TriggeredEvent list = []
+    let mutable counter = 0
+    let mutable backgroundTasks : Map<int, (int * string * Locator) option Async> = Map.empty
+    let mutable taskGenerators : Map<int, string * (Locator -> Locator Async)> = Map.empty
     
     override this.ToString() : string =
         $"State({store}, {actorTypes})"
+        
+    // Returns true iff there are more events to process
+    member this.triggerEvent() : bool =
+        if eventQueue.IsEmpty then
+            false
+        else
+            let nextEvent = eventQueue.Head
+            eventQueue <- eventQueue.Tail
+            match nextEvent with
+            | TriggeredEvent (actorType, fieldName) -> actorTypes[actorType].trigger(this, fieldName)
+            | TriggeredEventInState (varName, fieldName) ->
+                match store[varName] with
+                | ActorVal (actorType, fields) ->
+                    let newFields = actorTypes[actorType].trigger(this, fieldName, fields)
+                    store <- store.Change(varName, Option.map (fun _ -> ActorVal (actorType, newFields)))
+                | x -> failwith $"Expected store[varName] to be an ActorVal, but instead got: {x}"
+            not eventQueue.IsEmpty
         
     member this.getStore() : Map<string, Locator> = store
     member this.setStore(newStore : Map<string, Locator>) = store <- newStore
@@ -172,25 +195,25 @@ type State() =
     member this.newVar(name : string) =
         store <- store.Add(name, Uninitialized)
         
-    member this.lookup(name : string) =
+    member this.lookup(name : string, f : Locator -> Locator) =
         match store[name] with
-        | ActorVal (_, fields) -> fields["output"]
-        | value -> value
+        | ActorVal (_, fields) -> f fields["output"]
+        | value -> f value
     
     member this.take(name : string, f : Locator -> Locator) =
         let result = match store[name] with
                      | ActorVal (actorType, fields) ->
                          let value = fields["output"]
                          let newFields = fields.Change("output", Option.map (fun cur -> remove cur (f cur)))
-                         let newState = actorTypes[actorType].trigger(this, "output", newFields)
-                         store <- store.Change(name, Option.map (fun _ -> ActorVal (actorType, newState)))
+                         eventQueue <- eventQueue @ [TriggeredEventInState (name, "output")]
+                         store <- store.Change(name, Option.map (fun _ -> ActorVal (actorType, newFields)))
                          f value
                      | value ->
                          store <- store.Change(name, Option.map (fun cur -> remove cur (f cur)))
                          f value
         if store.ContainsKey("thisType") then
             match store["thisType"] with
-            | StrLit actorType -> actorTypes[actorType].trigger(this, name)
+            | StrLit actorType -> eventQueue <- eventQueue @ [TriggeredEvent (actorType, name)]
             | x -> failwith $"thisType should always map to a string literal, but got: {x}"
         result
         
@@ -199,19 +222,74 @@ type State() =
             match loc with
             | ActorVal (actorType, fields) ->
                 let newThis = fields.Change("input", Option.map (combine value))
-                let newState = actorTypes[actorType].trigger(this, "input", newThis)
-                ActorVal (actorType, newState)
+                eventQueue <- eventQueue @ [TriggeredEventInState (name, "input")]
+                ActorVal (actorType, newThis)
             | curVal -> combine value curVal
         if store.ContainsKey("thisType") then
             match store["thisType"] with
-            | StrLit actorType -> actorTypes[actorType].trigger(this, name)
+            | StrLit actorType -> eventQueue <- eventQueue @ [TriggeredEvent (actorType, name)] 
             | x -> failwith $"thisType should always map to a string literal, but got: {x}"
         store <- store.Change(name, Option.map receiveValue)
+        
+    member this.generateBackgroundTask(generatorId : int, prevValue : Locator) =
+        backgroundTasks <- backgroundTasks.Add(counter, async {
+            let dst, gen = taskGenerators[generatorId] 
+            let! value = gen prevValue
+            return Some (generatorId, dst, value)
+        })
+        counter <- counter + 1
+        
+    member this.addBackgroundTask(dst : string, taskGenerator : Locator -> Locator Async) =
+        taskGenerators <- taskGenerators.Add(counter, (dst, taskGenerator))
+        counter <- counter + 1
+        this.generateBackgroundTask(counter - 1, Nothing)
+        
+    member this.isRunning() : bool =
+        match backgroundTasks.Values |> Async.Choice |> Async.RunSynchronously with
+        | None -> ()
+        | Some (generatorId, dst, generatedValue) ->
+            this.generateBackgroundTask(generatorId, generatedValue)
+            evaluateFlow this (SimpleFlow (generatedValue, VarRef dst))
+        not eventQueue.IsEmpty // || Map.exists (fun _ -> isActorVal) store
+        
+let interpret (s : State) (stmts : Statement list) =
+    if evaluate s stmts then
+        while s.isRunning() do
+            while s.triggerEvent() do
+                ()
 
-let evaluate (s : State) (stmts : list<Statement>) =
-    let mutable currentState = s
-    for stmt in stmts do
-        evaluateStmt currentState stmt
+let evaluate (s : State) (stmts : list<Statement>) : bool =
+    let oldStore = s.getStore()
+    try
+        for stmt in stmts do
+            evaluateStmt s stmt
+            
+        true
+    with
+    | FlowException _ ->
+        s.setStore(oldStore)
+        false
+        
+// Returns true iff the body of the event was evaluated
+let evaluateEvent (s : State) (e : Statement) : bool =
+    match e with
+    | SimpleEvent (_, trigger, body) ->
+        if evaluate s trigger then
+            evaluate s body |> ignore
+            true
+        else
+            false
+    | ChainedEvent (_, trigger, children) ->
+        if evaluate s trigger then
+            let mutable evaluated = false
+            for child in children do
+                if not evaluated then
+                    if evaluateEvent s child then
+                        evaluated <- true
+            evaluated
+        else
+            false
+    | x -> failwith $"Unsupported: {x}"
 
 let evaluateStmt (s : State) (stmt : Statement) =
     match stmt with
@@ -241,41 +319,137 @@ let transform (s : State) (tr : Transformer) (value : Locator) : Locator =
         resolveSrc s id loc
     | _ -> failwith "todo"
     
-let resolveSrc (s : State) (f : Locator -> Locator) (loc : Locator) : Locator =
+let evaluateExpr (s : State) (f : Locator -> Locator) (loc : Locator) : Locator =
     match loc with
     | Uninitialized -> raise (Exception("Expected value, got `uninitialized`"))
     | Consume -> raise (Exception("Can't use `consume` as a source!"))
     | Stdout -> raise (Exception("Can't use `stdout` as a source!"))
-    | This -> s.take("this", f)
+    | This -> s.lookup("this", f)
     | ActorVal (actorType, vals) -> ActorVal (actorType, vals)
     | VarDef name ->
         s.newVar(name)
-        s.take(name, f)
+        s.lookup(name, f)
     | VarDefTyped (name, typ) ->
         s.newVar(name, typ)
-        s.take(name, f)
-    | VarRef name -> s.take(name, f)
+        s.lookup(name, f)
+    | VarRef name -> s.lookup(name, f)
     | Select (loc, sel) ->
-        let toTake = resolveSrc s (fun _ -> Nothing) sel
-        resolveSrc s (fun _ -> toTake) loc
-    | Copy (VarRef name) -> s.lookup(name)
+        let toTake = evaluateExpr s id sel
+        evaluateExpr s (fun _ -> toTake) loc
+    | SelectQuant (loc, quant) ->
+        let sel = match quant with
+                  | Every -> id
+                  | Nonempty -> fun value ->
+                      match value with
+                      | LocatorList (_ :: _) -> value
+                      | LocatorStream (_ :: _) -> value
+                      | IntLit n when n > 0 -> value
+                      | NatLit n when n > 0 -> value
+                      | StrLit s when s.Length > 0 -> value
+                      | BoolLit b when b -> value
+                      | _ -> raise (FlowException($"Wanted to select `nonempty` but got: {value}"))
+                  | AnyQuant -> f
+                  | Exactly nLoc ->
+                      match evaluateExpr s id nLoc with
+                      | NatLit n -> fun value ->
+                          match value with
+                          | LocatorList xs when xs.Length >= n -> LocatorList (List.take n xs)
+                          | LocatorStream xs when xs.Length >= n -> LocatorStream (List.take n xs)
+                          | IntLit m when m >= n -> IntLit n
+                          | NatLit m when m >= n -> NatLit n
+                          | StrLit s when s.Length >= n -> StrLit (s.Substring(s.Length - n))
+                          | BoolLit b when (b && n > 0) || n = 0 -> value
+                          | _ -> raise (FlowException($"Wanted to select `{n}` but got: {value}"))
+                      | x -> failwith $"Expected {nLoc} to evaluate to an integer, but got {x} instead."
+                      
+        evaluateExpr s sel loc
+    | Copy (VarRef name) -> s.lookup(name, id)
     | IntLit n -> IntLit n
     | NatLit n -> NatLit n
     | StrLit s -> StrLit s
     | BoolLit b -> BoolLit b
     | Unify _ -> raise (Exception("Can't use `unify(...)` as a source!"))
     | Combine (a, b) ->
-        let aVal = resolveSrc s f a
-        let bVal = resolveSrc s f b
+        let aVal = evaluateExpr s f a
+        let bVal = evaluateExpr s f b
         combine aVal bVal
     | Format (format, args) ->
         match resolveSrc s f format with
         | StrLit formatStr ->
-            let argVals = List.map (resolveSrc s f) args
+            let argVals = List.map (evaluateExpr s f) args
             StrLit (String.Format(formatStr, argVals))
         | x -> raise (Exception($"Expected {format} to resolve to a string, but got: {x}"))
-    | LocatorList xs -> LocatorList (List.map (resolveSrc s f) xs)
-    | x -> raise (Exception($"Unsupported source locator: {x}"))
+    | LocatorList xs -> LocatorList (List.map (evaluateExpr s f) xs)
+    | x -> raise (Exception($"Unsupported expression locator: {x}"))
+    
+let resolveSrc (s : State) (f : Locator -> Locator) (loc : Locator) : Locator =
+    let resolvedVal =
+        match loc with
+        | Uninitialized -> raise (Exception("Expected value, got `uninitialized`"))
+        | Consume -> raise (Exception("Can't use `consume` as a source!"))
+        | Stdout -> raise (Exception("Can't use `stdout` as a source!"))
+        | This -> s.take("this", f)
+        | ActorVal (actorType, vals) -> ActorVal (actorType, vals)
+        | VarDef name ->
+            s.newVar(name)
+            s.take(name, f)
+        | VarDefTyped (name, typ) ->
+            s.newVar(name, typ)
+            s.take(name, f)
+        | VarRef name -> s.take(name, f)
+        | Select (loc, sel) ->
+            let toTake = evaluateExpr s id sel
+            resolveSrc s (fun _ -> toTake) loc
+        | SelectQuant (loc, quant) ->
+            let sel = match quant with
+                      | Every -> id
+                      | Nonempty -> fun value ->
+                          match value with
+                          | LocatorList (x :: xs) -> value
+                          | LocatorStream (x :: xs) -> value
+                          | IntLit n when n > 0 -> value
+                          | NatLit n when n > 0 -> value
+                          | StrLit s when s.Length > 0 -> value
+                          | BoolLit b when b -> value
+                          | _ -> raise (FlowException($"Wanted to select `nonempty` but got: {value}"))
+                      | AnyQuant -> f
+                      | Exactly nLoc ->
+                          match evaluateExpr s id nLoc with
+                          | NatLit n -> fun value ->
+                              match value with
+                              | LocatorList xs when xs.Length >= n -> LocatorList (List.take n xs)
+                              | LocatorStream xs when xs.Length >= n -> LocatorStream (List.take n xs)
+                              | IntLit m when m >= n -> IntLit n
+                              | NatLit m when m >= n -> NatLit n
+                              | StrLit s when s.Length >= n -> StrLit (s.Substring(s.Length - n))
+                              | BoolLit b when (b && n > 0) || n = 0 -> value
+                              | _ -> raise (FlowException($"Wanted to select `{n}` but got: {value}"))
+                          | x -> failwith $"Expected {nLoc} to evaluate to an integer, but got {x} instead."
+                          
+            resolveSrc s sel loc
+        | Copy (VarRef name) -> s.lookup(name, id)
+        | IntLit n -> IntLit n
+        | NatLit n -> NatLit n
+        | StrLit s -> StrLit s
+        | BoolLit b -> BoolLit b
+        | Unify _ -> raise (Exception("Can't use `unify(...)` as a source!"))
+        | Combine (a, b) ->
+            let aVal = resolveSrc s f a
+            let bVal = resolveSrc s f b
+            combine aVal bVal
+        | Format (format, args) ->
+            match resolveSrc s f format with
+            | StrLit formatStr ->
+                let argVals = List.map (resolveSrc s f) args
+                StrLit (String.Format(formatStr, argVals))
+            | x -> raise (Exception($"Expected {format} to resolve to a string, but got: {x}"))
+        | LocatorList xs -> LocatorList (List.map (resolveSrc s f) xs)
+        | x -> raise (Exception($"Unsupported source locator: {x}"))
+    
+    while s.triggerEvent() do
+        ()
+        
+    resolvedVal
     
 let sendToDst (s : State) (loc : Locator) (value : Locator) =
     match loc with
@@ -293,6 +467,7 @@ let sendToDst (s : State) (loc : Locator) (value : Locator) =
     | NatLit _ -> raise (Exception("Can't use a natural number as a destination!"))
     | StrLit _ -> raise (Exception("Can't use a string as a destination!"))
     | BoolLit _ -> raise (Exception("Can't use a boolean as a destination!"))
+    | Unify loc -> tryUnify loc value
     | LocatorList xs ->
         match value with
         | LocatorList ys ->
@@ -304,6 +479,21 @@ let sendToDst (s : State) (loc : Locator) (value : Locator) =
         | x -> raise (Exception($"Can only use a list as a destination if the value being sent is a list or stream, but got: {x}"))
     | x -> raise (Exception($"Unsupported destination locator: {x}"))
     
+    while s.triggerEvent() do
+        ()
+    
+let tryUnify (a : Locator) (b : Locator) =
+    match a, b with
+    | IntLit n, IntLit m when n = m -> ()
+    | NatLit n, NatLit m when n = m -> ()
+    | StrLit s, StrLit t when s = t -> ()
+    | BoolLit b, BoolLit c when b = c -> ()
+    | LocatorList xs, LocatorList ys -> List.iter2 tryUnify xs ys
+    | LocatorList xs, LocatorStream ys -> List.iter2 tryUnify xs ys
+    | LocatorStream xs, LocatorList ys -> List.iter2 tryUnify xs ys
+    | LocatorStream xs, LocatorStream ys -> List.iter2 tryUnify xs ys
+    | _ -> raise (FlowException($"Could not unify {a} and {b}"))
+    
 let combine (a : Locator) (b : Locator) : Locator =
     match a, b with
     | IntLit n, IntLit m -> IntLit (n + m)
@@ -311,12 +501,13 @@ let combine (a : Locator) (b : Locator) : Locator =
     | StrLit s, StrLit t -> StrLit (s + t)
     | BoolLit b, BoolLit c -> BoolLit (b || c)
     | LocatorList xs, LocatorList ys -> LocatorList (xs @ ys)
-    | LocatorList xs, LocatorStream ys -> LocatorStream (List.rev xs @ xs)
-    | LocatorStream xs, LocatorList ys -> LocatorStream (xs @ List.rev ys)
-    | LocatorStream xs, LocatorStream ys -> LocatorStream (ys @ xs)
+    | LocatorList xs, LocatorStream ys -> LocatorStream (xs @ ys)
+    | LocatorStream xs, LocatorList ys -> LocatorStream (xs @ ys)
+    | LocatorStream xs, LocatorStream ys -> LocatorStream (xs @ ys)
     | x, LocatorList xs -> LocatorList (xs @ [x])
-    | x, LocatorStream xs -> LocatorStream (x :: xs)
+    | x, LocatorStream xs -> LocatorStream (xs @ [x])
     | x, Uninitialized -> x
+    | x, Nothing -> x
     | _ -> Uninitialized
     
 let rec removeElem (xs : 'a list) (x : 'a) : 'a list =

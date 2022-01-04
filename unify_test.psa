@@ -1,0 +1,15 @@
+actor Lines receives string emits list string {
+    var buffer : string
+    
+    event ReceiveChar on {
+        input --[ ! ]-> var c : string
+    } and then {
+        event on { c --> unify("\n") } do { buffer --> output }
+        event on { } do { c --> buffer }
+    }
+}
+
+[""] --> start Lines --> var lines : Lines
+"test" --> lines
+" and more\n" --> lines
+"blah" --> lines

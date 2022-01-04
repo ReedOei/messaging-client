@@ -82,33 +82,14 @@ let ReceiveInfos (socket : Socket) = seq {
             linesIt.Current |> printfn "%s"
 }
 
-//printfn "%A" (Parser.program "5 --> var x\n\
-//                              \"te\\\"st\" --> var s")
-//printfn "%A" (Parser.program "event KeyPress on { stdin --> var x } do { \"te\\\"st\" --> var s }")
-//printfn "%A" (Parser.program "[1,2] --> var list")
-//printfn "%A" (Parser.program "[stdout] --> var list")
-//printfn "%A" (Parser.program "[] --> var list")
-//printfn "%A" (Parser.program "copy(list) --> this")
-//printfn "%A" (Parser.program "format(s, x, y) --> this")
-//printfn "%A" (Parser.program "format(s) --> this")
-//printfn "%A" (Parser.program "event ReceiveArgs on { input --> [var time, var msgText] } do { 5 --> var x }")
-//printfn "%A" (Parser.actor "actor Formatter { var outStream : stream }")
-printfn "%A" (Parser.program
-"actor Formatter receives list any {\n\
-    var formatStr : string\n\
+let debugProgram (filename : string) = 
+    match Parser.program (System.IO.File.ReadAllText filename) with
+    | Some (leftover, program) when leftover = "" ->
+        printfn "Program: %A" program
+        let state = Interpreter.State()
+        Interpreter.evaluate state program
+        printfn "State: %A" (state.ToString())
+    | x -> printfn "Error"
     
-    event ReceiveArgs on {\n\
-        input --> [var time, var msgText]\n\
-    } do {\n\
-        format(formatStr, time, msgText) --> output\n\
-        this --> consume\n\
-    }\n\
-}")
-
-match Parser.program (System.IO.File.ReadAllText "test.psa") with
-| Some (leftover, program) when leftover = "" ->
-    printfn "Program: %A" program
-    let state = Interpreter.State()
-    Interpreter.evaluate state program
-    printfn "State: %A" (state.ToString())
-| x -> printfn "Error"
+debugProgram "test.psa"
+debugProgram "unify_test.psa"

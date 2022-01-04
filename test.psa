@@ -1,4 +1,4 @@
-actor Naturals receives nat {
+actor Naturals receives nat emits list nat {
     var current : nat
     
     event Next on {
@@ -7,8 +7,6 @@ actor Naturals receives nat {
         copy(current) --> output
     }
 }
-
-5 --> var x
 
 [0] --> start Naturals --> var nats : Naturals
 

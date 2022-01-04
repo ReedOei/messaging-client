@@ -12,6 +12,7 @@
         <Content Include="message-client.psa" />
         <Compile Include="Program.fs" />
         <Content Include="test.psa" />
+        <Content Include="unify_test.psa" />
     </ItemGroup>
 
 </Project>
