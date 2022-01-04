@@ -199,13 +199,16 @@ type State() =
         match store[name] with
         | ActorVal (_, fields) -> f fields["output"]
         | value -> f value
+        
+    member this.queueEvent(e : TriggeredEvent) =
+        eventQueue <- eventQueue @ [e]
     
     member this.take(name : string, f : Locator -> Locator) =
         let result = match store[name] with
                      | ActorVal (actorType, fields) ->
                          let value = fields["output"]
                          let newFields = fields.Change("output", Option.map (fun cur -> remove cur (f cur)))
-                         eventQueue <- eventQueue @ [TriggeredEventInState (name, "output")]
+                         this.queueEvent(TriggeredEventInState (name, "output"))
                          store <- store.Change(name, Option.map (fun _ -> ActorVal (actorType, newFields)))
                          f value
                      | value ->
@@ -213,7 +216,7 @@ type State() =
                          f value
         if store.ContainsKey("thisType") then
             match store["thisType"] with
-            | StrLit actorType -> eventQueue <- eventQueue @ [TriggeredEvent (actorType, name)]
+            | StrLit actorType -> this.queueEvent(TriggeredEvent (actorType, name))
             | x -> failwith $"thisType should always map to a string literal, but got: {x}"
         result
         
@@ -221,13 +224,13 @@ type State() =
         let receiveValue (loc : Locator) =
             match loc with
             | ActorVal (actorType, fields) ->
-                let newThis = fields.Change("input", Option.map (combine value))
-                eventQueue <- eventQueue @ [TriggeredEventInState (name, "input")]
+                let newThis = fields.Change("input", Option.map (fun cur -> combine cur value))
+                this.queueEvent(TriggeredEventInState (name, "input"))
                 ActorVal (actorType, newThis)
-            | curVal -> combine value curVal
+            | curVal -> combine curVal value
         if store.ContainsKey("thisType") then
             match store["thisType"] with
-            | StrLit actorType -> eventQueue <- eventQueue @ [TriggeredEvent (actorType, name)] 
+            | StrLit actorType -> this.queueEvent(TriggeredEvent (actorType, name))
             | x -> failwith $"thisType should always map to a string literal, but got: {x}"
         store <- store.Change(name, Option.map receiveValue)
         
@@ -319,6 +322,32 @@ let transform (s : State) (tr : Transformer) (value : Locator) : Locator =
         resolveSrc s id loc
     | _ -> failwith "todo"
     
+let resolveQuantSel (s : State) (quant : TypeQuant) (f : Locator -> Locator) : Locator -> Locator =
+    match quant with
+    | Every -> id
+    | Nonempty -> fun value ->
+        match value with
+        | LocatorList (_ :: _) -> value
+        | LocatorStream (_ :: _) -> value
+        | IntLit n when n > 0 -> value
+        | NatLit n when n > 0 -> value
+        | StrLit s when s.Length > 0 -> value
+        | BoolLit b when b -> value
+        | _ -> raise (FlowException($"Wanted to select `nonempty` but got: {value}"))
+    | AnyQuant -> f
+    | Exactly nLoc ->
+        match evaluateExpr s id nLoc with
+        | NatLit n -> fun value ->
+            match value with
+            | LocatorList xs when xs.Length >= n -> LocatorList (List.take n xs)
+            | LocatorStream xs when xs.Length >= n -> LocatorStream (List.take n xs)
+            | IntLit m when m >= n -> IntLit n
+            | NatLit m when m >= n -> NatLit n
+            | StrLit s when s.Length >= n -> StrLit (s.Substring(s.Length - n))
+            | BoolLit b when (b && n > 0) || n = 0 -> value
+            | _ -> raise (FlowException($"Wanted to select `{n}` but got: {value}"))
+        | x -> failwith $"Expected {nLoc} to evaluate to an integer, but got {x} instead."
+    
 let evaluateExpr (s : State) (f : Locator -> Locator) (loc : Locator) : Locator =
     match loc with
     | Uninitialized -> raise (Exception("Expected value, got `uninitialized`"))
@@ -337,32 +366,7 @@ let evaluateExpr (s : State) (f : Locator -> Locator) (loc : Locator) : Locator 
         let toTake = evaluateExpr s id sel
         evaluateExpr s (fun _ -> toTake) loc
     | SelectQuant (loc, quant) ->
-        let sel = match quant with
-                  | Every -> id
-                  | Nonempty -> fun value ->
-                      match value with
-                      | LocatorList (_ :: _) -> value
-                      | LocatorStream (_ :: _) -> value
-                      | IntLit n when n > 0 -> value
-                      | NatLit n when n > 0 -> value
-                      | StrLit s when s.Length > 0 -> value
-                      | BoolLit b when b -> value
-                      | _ -> raise (FlowException($"Wanted to select `nonempty` but got: {value}"))
-                  | AnyQuant -> f
-                  | Exactly nLoc ->
-                      match evaluateExpr s id nLoc with
-                      | NatLit n -> fun value ->
-                          match value with
-                          | LocatorList xs when xs.Length >= n -> LocatorList (List.take n xs)
-                          | LocatorStream xs when xs.Length >= n -> LocatorStream (List.take n xs)
-                          | IntLit m when m >= n -> IntLit n
-                          | NatLit m when m >= n -> NatLit n
-                          | StrLit s when s.Length >= n -> StrLit (s.Substring(s.Length - n))
-                          | BoolLit b when (b && n > 0) || n = 0 -> value
-                          | _ -> raise (FlowException($"Wanted to select `{n}` but got: {value}"))
-                      | x -> failwith $"Expected {nLoc} to evaluate to an integer, but got {x} instead."
-                      
-        evaluateExpr s sel loc
+        evaluateExpr s (resolveQuantSel s quant f) loc
     | Copy (VarRef name) -> s.lookup(name, id)
     | IntLit n -> IntLit n
     | NatLit n -> NatLit n
@@ -401,32 +405,7 @@ let resolveSrc (s : State) (f : Locator -> Locator) (loc : Locator) : Locator =
             let toTake = evaluateExpr s id sel
             resolveSrc s (fun _ -> toTake) loc
         | SelectQuant (loc, quant) ->
-            let sel = match quant with
-                      | Every -> id
-                      | Nonempty -> fun value ->
-                          match value with
-                          | LocatorList (x :: xs) -> value
-                          | LocatorStream (x :: xs) -> value
-                          | IntLit n when n > 0 -> value
-                          | NatLit n when n > 0 -> value
-                          | StrLit s when s.Length > 0 -> value
-                          | BoolLit b when b -> value
-                          | _ -> raise (FlowException($"Wanted to select `nonempty` but got: {value}"))
-                      | AnyQuant -> f
-                      | Exactly nLoc ->
-                          match evaluateExpr s id nLoc with
-                          | NatLit n -> fun value ->
-                              match value with
-                              | LocatorList xs when xs.Length >= n -> LocatorList (List.take n xs)
-                              | LocatorStream xs when xs.Length >= n -> LocatorStream (List.take n xs)
-                              | IntLit m when m >= n -> IntLit n
-                              | NatLit m when m >= n -> NatLit n
-                              | StrLit s when s.Length >= n -> StrLit (s.Substring(s.Length - n))
-                              | BoolLit b when (b && n > 0) || n = 0 -> value
-                              | _ -> raise (FlowException($"Wanted to select `{n}` but got: {value}"))
-                          | x -> failwith $"Expected {nLoc} to evaluate to an integer, but got {x} instead."
-                          
-            resolveSrc s sel loc
+            resolveSrc s (resolveQuantSel s quant f) loc
         | Copy (VarRef name) -> s.lookup(name, id)
         | IntLit n -> IntLit n
         | NatLit n -> NatLit n
@@ -471,10 +450,14 @@ let sendToDst (s : State) (loc : Locator) (value : Locator) =
     | LocatorList xs ->
         match value with
         | LocatorList ys ->
+            if xs.Length <> ys.Length then
+                raise (FlowException($"Can't zip {xs} and {ys} together because they have different lengths!"))
             for x, y in List.zip xs ys do
                 sendToDst s x y
         | LocatorStream ys ->
-            for x, y in List.zip xs (List.rev ys) do
+            if xs.Length <> ys.Length then
+                raise (FlowException($"Can't zip {xs} and {ys} together because they have different lengths!"))
+            for x, y in List.zip xs ys do
                 sendToDst s x y
         | x -> raise (Exception($"Can only use a list as a destination if the value being sent is a list or stream, but got: {x}"))
     | x -> raise (Exception($"Unsupported destination locator: {x}"))
@@ -504,10 +487,12 @@ let combine (a : Locator) (b : Locator) : Locator =
     | LocatorList xs, LocatorStream ys -> LocatorStream (xs @ ys)
     | LocatorStream xs, LocatorList ys -> LocatorStream (xs @ ys)
     | LocatorStream xs, LocatorStream ys -> LocatorStream (xs @ ys)
-    | x, LocatorList xs -> LocatorList (xs @ [x])
-    | x, LocatorStream xs -> LocatorStream (xs @ [x])
+    | LocatorList xs, x -> LocatorList (xs @ [x])
+    | LocatorStream xs, x -> LocatorStream (xs @ [x])
     | x, Uninitialized -> x
     | x, Nothing -> x
+    | Uninitialized, x -> x
+    | Nothing, x -> x
     | _ -> Uninitialized
     
 let rec removeElem (xs : 'a list) (x : 'a) : 'a list =

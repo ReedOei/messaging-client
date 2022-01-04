@@ -85,10 +85,10 @@ let ReceiveInfos (socket : Socket) = seq {
 let debugProgram (filename : string) = 
     match Parser.program (System.IO.File.ReadAllText filename) with
     | Some (leftover, program) when leftover = "" ->
-        printfn "Program: %A" program
+//        printfn "Program: %A" program
         let state = Interpreter.State()
         Interpreter.evaluate state program
-        printfn "State: %A" (state.ToString())
+        printfn $"State: %A{state.ToString()}"
     | x -> printfn "Error"
     
 debugProgram "test.psa"

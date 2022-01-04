@@ -13,3 +13,5 @@ actor Lines receives string emits list string {
 "test" --> lines
 " and more\n" --> lines
 "blah" --> lines
+" and another line of text m8-y\n" --> lines
+"and sme leftover f'r the buffa" --> lines
