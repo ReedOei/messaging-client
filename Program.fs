@@ -87,7 +87,7 @@ let debugProgram (filename : string) =
     | Some (leftover, program) when leftover = "" ->
 //        printfn "Program: %A" program
         let state = Interpreter.State()
-        Interpreter.evaluate state program
+        Interpreter.interpret state program
         printfn $"State: %A{state.ToString()}"
     | x -> printfn "Error"
     

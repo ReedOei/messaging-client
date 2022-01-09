@@ -60,7 +60,7 @@ let vars (loc : Locator) : string list =
     | Stdin -> []
     | Stdout -> []
     | This -> []
-    | ActorVal _ -> []
+    | ActorRef _ -> []
     | VarDef _ -> []
     | VarDefTyped _ -> []
     | VarRef name -> [name]
@@ -98,9 +98,9 @@ let eventSources (stmt : Statement) : string list =
 
 exception FlowException of string
 
-type TriggeredEvent =
-    | TriggeredEvent of string * string
-    | TriggeredEventInState of string * string
+type TriggeredEvent = int * string
+    
+type ActorVal = string * Map<string, Locator>
 
 type ActorType(actorType : Statement) =
     let events : Map<string, Statement> =
@@ -121,11 +121,11 @@ type ActorType(actorType : Statement) =
     override this.ToString() : string =
         $"ActorType({events}, {sourceToEvents}, {actorType})"
         
-    member this.initFields(fieldValues : Locator list) : Map<string, Locator> =
+    member this.initFields(ref : int, fieldValues : Locator list) : Map<string, Locator> =
         let actorState =
             match actorType with
             | Actor (name, recvTyp, sendTyp, members) ->
-                [("input", defaultVal recvTyp); ("output", defaultVal sendTyp); ("thisType", StrLit name)]
+                [("input", defaultVal recvTyp); ("output", defaultVal sendTyp); ("thisType", StrLit name); ("thisRef", ActorRef ref)]
                 @ List.map initField (List.zip (List.filter isField members) fieldValues)
             | x -> raise (Exception($"Expected '{actorType}' to map to an actor type, but got: {x}"))
             
@@ -146,14 +146,10 @@ type ActorType(actorType : Statement) =
             resultStore <- s.getStore()
             s.setStore(oldStore)
         resultStore
-        
-let isActorVal (loc : Locator) : bool =
-    match loc with
-    | ActorVal _ -> true
-    | _ -> false
 
 type State() =
     let mutable store : Map<string, Locator> = Map.empty
+    let mutable actorStore : Map<int, ActorVal> = Map.empty
     let mutable actorTypes : Map<string, ActorType> = Map.empty
     let mutable eventQueue : TriggeredEvent list = []
     let mutable counter = 0
@@ -161,7 +157,7 @@ type State() =
     let mutable taskGenerators : Map<int, string * (Locator -> Locator Async)> = Map.empty
     
     override this.ToString() : string =
-        $"State({store}, {actorTypes})"
+        $"State(%A{store}, %A{actorStore})"
         
     // Returns true iff there are more events to process
     member this.triggerEvent() : bool =
@@ -170,14 +166,12 @@ type State() =
         else
             let nextEvent = eventQueue.Head
             eventQueue <- eventQueue.Tail
-            match nextEvent with
-            | TriggeredEvent (actorType, fieldName) -> actorTypes[actorType].trigger(this, fieldName)
-            | TriggeredEventInState (varName, fieldName) ->
-                match store[varName] with
-                | ActorVal (actorType, fields) ->
-                    let newFields = actorTypes[actorType].trigger(this, fieldName, fields)
-                    store <- store.Change(varName, Option.map (fun _ -> ActorVal (actorType, newFields)))
-                | x -> failwith $"Expected store[varName] to be an ActorVal, but instead got: {x}"
+            
+            let ref, fieldName = nextEvent
+            let actorType, fields = actorStore[ref]
+            let newFields = actorTypes[actorType].trigger(this, fieldName, fields)
+            actorStore <- actorStore.Change(ref, Option.map (fun _ -> ActorVal (actorType, newFields)))
+            
             not eventQueue.IsEmpty
         
     member this.getStore() : Map<string, Locator> = store
@@ -187,7 +181,10 @@ type State() =
         actorTypes <- actorTypes.Add(name, ActorType(actorType))
         
     member this.newActor(actorType : string, fieldValues : Locator list) =
-        ActorVal (actorType, actorTypes[actorType].initFields(fieldValues))
+        let ref = counter
+        counter <- counter + 1
+        actorStore <- actorStore.Add(ref, ActorVal (actorType, actorTypes[actorType].initFields(ref, fieldValues)))
+        ActorRef ref
         
     member this.newVar(name : string, typ : PsaType) =
         store <- store.Add(name, defaultVal typ)
@@ -197,7 +194,9 @@ type State() =
         
     member this.lookup(name : string, f : Locator -> Locator) =
         match store[name] with
-        | ActorVal (_, fields) -> f fields["output"]
+        | ActorRef ref ->
+            let _, fields = actorStore[ref]
+            f fields["output"]
         | value -> f value
         
     member this.queueEvent(e : TriggeredEvent) =
@@ -205,34 +204,43 @@ type State() =
     
     member this.take(name : string, f : Locator -> Locator) =
         let result = match store[name] with
-                     | ActorVal (actorType, fields) ->
+                     | ActorRef ref ->
+                         let actorType, fields = actorStore[ref]
                          let value = fields["output"]
                          let newFields = fields.Change("output", Option.map (fun cur -> remove cur (f cur)))
-                         this.queueEvent(TriggeredEventInState (name, "output"))
-                         store <- store.Change(name, Option.map (fun _ -> ActorVal (actorType, newFields)))
+                         actorStore <- actorStore.Change(ref, Option.map (fun _ -> ActorVal (actorType, newFields)))
+                         
+                         this.queueEvent((ref, "output"))
+                         
                          f value
                      | value ->
                          store <- store.Change(name, Option.map (fun cur -> remove cur (f cur)))
                          f value
-        if store.ContainsKey("thisType") then
-            match store["thisType"] with
-            | StrLit actorType -> this.queueEvent(TriggeredEvent (actorType, name))
-            | x -> failwith $"thisType should always map to a string literal, but got: {x}"
+        if store.ContainsKey("thisRef") then
+            match store["thisRef"] with
+            | ActorRef ref -> this.queueEvent((ref, name))
+            | x -> failwith $"thisRef should always map to an ActorRef, but got: {x}"
         result
         
     member this.receive(name : string, value : Locator) =
         let receiveValue (loc : Locator) =
             match loc with
-            | ActorVal (actorType, fields) ->
-                let newThis = fields.Change("input", Option.map (fun cur -> combine cur value))
-                this.queueEvent(TriggeredEventInState (name, "input"))
-                ActorVal (actorType, newThis)
+            | ActorRef ref ->
+                this.receiveInField(ref, "input", value)
+                ActorRef ref
             | curVal -> combine curVal value
-        if store.ContainsKey("thisType") then
-            match store["thisType"] with
-            | StrLit actorType -> this.queueEvent(TriggeredEvent (actorType, name))
-            | x -> failwith $"thisType should always map to a string literal, but got: {x}"
+        if store.ContainsKey("thisRef") then
+            match store["thisRef"] with
+            | ActorRef ref -> this.queueEvent((ref, name))
+            | x -> failwith $"thisRef should always map to an ActorRef, but got: {x}"
         store <- store.Change(name, Option.map receiveValue)
+        
+    member this.receiveInField(ref : int, fieldName : string, value : Locator) =
+        let actorType, fields = actorStore[ref]
+        let newFields = fields.Change(fieldName, Option.map (fun cur -> combine cur value))
+        actorStore <- actorStore.Change(ref, Option.map (fun _ -> ActorVal (actorType, newFields)))
+        
+        this.queueEvent((ref, "input"))
         
     member this.generateBackgroundTask(generatorId : int, prevValue : Locator) =
         backgroundTasks <- backgroundTasks.Add(counter, async {
@@ -343,7 +351,7 @@ let resolveQuantSel (s : State) (quant : TypeQuant) (f : Locator -> Locator) : L
             | LocatorStream xs when xs.Length >= n -> LocatorStream (List.take n xs)
             | IntLit m when m >= n -> IntLit n
             | NatLit m when m >= n -> NatLit n
-            | StrLit s when s.Length >= n -> StrLit (s.Substring(s.Length - n))
+            | StrLit s when s.Length >= n -> StrLit (s.Substring(0, n))
             | BoolLit b when (b && n > 0) || n = 0 -> value
             | _ -> raise (FlowException($"Wanted to select `{n}` but got: {value}"))
         | x -> failwith $"Expected {nLoc} to evaluate to an integer, but got {x} instead."
@@ -354,7 +362,7 @@ let evaluateExpr (s : State) (f : Locator -> Locator) (loc : Locator) : Locator 
     | Consume -> raise (Exception("Can't use `consume` as a source!"))
     | Stdout -> raise (Exception("Can't use `stdout` as a source!"))
     | This -> s.lookup("this", f)
-    | ActorVal (actorType, vals) -> ActorVal (actorType, vals)
+    | ActorRef ref -> ActorRef ref
     | VarDef name ->
         s.newVar(name)
         s.lookup(name, f)
@@ -393,7 +401,7 @@ let resolveSrc (s : State) (f : Locator -> Locator) (loc : Locator) : Locator =
         | Consume -> raise (Exception("Can't use `consume` as a source!"))
         | Stdout -> raise (Exception("Can't use `stdout` as a source!"))
         | This -> s.take("this", f)
-        | ActorVal (actorType, vals) -> ActorVal (actorType, vals)
+        | ActorRef ref -> ActorRef ref
         | VarDef name ->
             s.newVar(name)
             s.take(name, f)
@@ -424,10 +432,6 @@ let resolveSrc (s : State) (f : Locator -> Locator) (loc : Locator) : Locator =
             | x -> raise (Exception($"Expected {format} to resolve to a string, but got: {x}"))
         | LocatorList xs -> LocatorList (List.map (resolveSrc s f) xs)
         | x -> raise (Exception($"Unsupported source locator: {x}"))
-    
-    while s.triggerEvent() do
-        ()
-        
     resolvedVal
     
 let sendToDst (s : State) (loc : Locator) (value : Locator) =
@@ -441,7 +445,11 @@ let sendToDst (s : State) (loc : Locator) (value : Locator) =
         s.newVar(name, typ)
         s.receive(name, value)
     | VarRef name -> s.receive(name, value)
-//    | ActorRef id -> s.receiveInActor(id, "input", value)
+    | ActorRef ref -> s.receiveInField(ref, "input", value)
+    | FieldAccess (loc, fieldName) ->
+        match evaluateExpr s id loc with
+        | ActorRef ref -> s.receiveInField(ref, fieldName, value)
+        | x -> failwith $"Expected to get an ActorRef from {loc} but instead got: {x}"
     | IntLit _ -> raise (Exception("Can't use an integer as a destination!"))
     | NatLit _ -> raise (Exception("Can't use a natural number as a destination!"))
     | StrLit _ -> raise (Exception("Can't use a string as a destination!"))
@@ -461,9 +469,6 @@ let sendToDst (s : State) (loc : Locator) (value : Locator) =
                 sendToDst s x y
         | x -> raise (Exception($"Can only use a list as a destination if the value being sent is a list or stream, but got: {x}"))
     | x -> raise (Exception($"Unsupported destination locator: {x}"))
-    
-    while s.triggerEvent() do
-        ()
     
 let tryUnify (a : Locator) (b : Locator) =
     match a, b with
@@ -512,8 +517,8 @@ let remove (a : Locator) (b : Locator) : Locator =
         else
             raise (FlowException($"Could not take {m} from {n}"))
     | StrLit s, StrLit t ->
-        if s.EndsWith(t) then
-            StrLit (s.Substring(0, s.Length - t.Length))
+        if s.StartsWith(t) then
+            StrLit (s.Substring(t.Length))
         else
             raise (FlowException($"Could not remove {t} from {s}"))
     | BoolLit b, BoolLit c -> BoolLit c

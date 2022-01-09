@@ -190,7 +190,7 @@ type Locator =
     | Stdin
     | Stdout
     | This
-    | ActorVal of string * Map<string, Locator>
+    | ActorRef of int
     | VarDef of string
     | VarDefTyped of string * PsaType
     | VarRef of string
