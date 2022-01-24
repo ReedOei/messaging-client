@@ -16,6 +16,7 @@
         <Content Include="laws" />
         <Content Include="hello-world.psa" />
         <Content Include="message-passing.psa" />
+        <Content Include="counter.psa" />
     </ItemGroup>
 
 </Project>

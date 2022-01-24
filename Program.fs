@@ -103,3 +103,4 @@ debugProgram "unify-test.psa"
 debugProgram "message-passing.psa"
 
 runProgram "hello-world.psa"
+//debugProgram "counter.psa"

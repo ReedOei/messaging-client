@@ -194,8 +194,8 @@ type Locator =
     | VarDef of string
     | VarDefTyped of string * PsaType
     | VarRef of string
-    | IntLit of int
-    | NatLit of int
+    | IntLit of int64
+    | NatLit of uint64
     | StrLit of string
     | BoolLit of bool
     | Copy of Locator
@@ -306,7 +306,7 @@ let numLit : Parser<Locator> = parser {
     if n < 0 then
         return IntLit n
     else
-        return NatLit n
+        return NatLit (uint64 n)
 }
 
 let startActor : Parser<Transformer> = parser {
@@ -354,7 +354,7 @@ let exactlyQuant : Parser<TypeQuant> = parser {
     let! _ = symbol (char '|')
     let! n = integer
     let! _ = symbol (char '|')
-    return Exactly (NatLit n)
+    return Exactly (NatLit (uint64 n))
 }
     
 let typeQuant : Parser<TypeQuant> =
@@ -363,8 +363,8 @@ let typeQuant : Parser<TypeQuant> =
     <|> (symbol (string "any") |>> AnyQuant)
     <|> (symbol (string "*") |>> AnyQuant)
     <|> (symbol (string "every") |>> Every)
-    <|> (symbol (string "empty") |>> Exactly (NatLit 0))
-    <|> (symbol (string "!") |>> Exactly (NatLit 1))
+    <|> (symbol (string "empty") |>> Exactly (NatLit 0UL))
+    <|> (symbol (string "!") |>> Exactly (NatLit 1UL))
     <|> exactlyQuant
 
 let selectLoc : Parser<Locator> = parser {
