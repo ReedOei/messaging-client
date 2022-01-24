@@ -11,10 +11,11 @@
         <Compile Include="Interpreter.fs" />
         <Content Include="message-client.psa" />
         <Compile Include="Program.fs" />
-        <Content Include="test.psa" />
+        <Content Include="nats.psa" />
         <Content Include="unify-test.psa" />
         <Content Include="laws" />
         <Content Include="hello-world.psa" />
+        <Content Include="message-passing.psa" />
     </ItemGroup>
 
 </Project>

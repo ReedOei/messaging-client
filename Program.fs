@@ -98,7 +98,8 @@ let runProgram (filename : string) =
         Interpreter.interpret state program
     | x -> printfn "Error"
     
-debugProgram "test.psa"
+debugProgram "nats.psa"
 debugProgram "unify-test.psa"
+debugProgram "message-passing.psa"
 
 runProgram "hello-world.psa"

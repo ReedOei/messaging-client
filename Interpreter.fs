@@ -249,6 +249,10 @@ type State() =
     member this.setActorStore(newStore : Map<int, ActorVal>) =
         actorStore <- newStore
         
+    member this.getEventQueue() = eventQueue
+    member this.setEventQueue(newQueue : TriggeredEvent list) =
+        eventQueue <- newQueue
+        
     member this.generateBackgroundTask(generatorId : int, prevValue : Locator) =
         backgroundTasks <- backgroundTasks.Add(counter, async {
             let dst, gen = taskGenerators[generatorId] 
@@ -279,6 +283,7 @@ let interpret (s : State) (stmts : Statement list) =
 let evaluate (s : State) (stmts : list<Statement>) : bool =
     let oldStore = s.getStore()
     let oldActorStore = s.getActorStore()
+    let oldQueue = s.getEventQueue()
     try
         for stmt in stmts do
             evaluateStmt s stmt
@@ -288,6 +293,7 @@ let evaluate (s : State) (stmts : list<Statement>) : bool =
     | FlowException _ ->
         s.setStore(oldStore)
         s.setActorStore(oldActorStore)
+        s.setEventQueue(oldQueue)
         false
         
 // Returns true iff the body of the event was evaluated

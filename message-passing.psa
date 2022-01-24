@@ -1,0 +1,18 @@
+actor Receiver receives any emits nat {
+    event A on {
+        input --[ |3| ]-> [unify("a"), var x, var y]
+    } do {
+        x --> output
+        y --> output
+    }
+    
+    event B on {
+        input --[ |4| ]-> [unify("b"), var x, var y, var z]
+    } do {
+        x --> output
+        z --> output
+    }
+}
+
+[] --> start Receiver --> var receiver : Receiver
+["a", 1, 2, "b", 1, 2, 3] --> receiver
