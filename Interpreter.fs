@@ -242,6 +242,13 @@ type State() =
         
         this.queueEvent((ref, "input"))
         
+    member this.consumeActor(ref : int) =
+        actorStore <- actorStore.Remove(ref)
+    
+    member this.getActorStore() = actorStore
+    member this.setActorStore(newStore : Map<int, ActorVal>) =
+        actorStore <- newStore
+        
     member this.generateBackgroundTask(generatorId : int, prevValue : Locator) =
         backgroundTasks <- backgroundTasks.Add(counter, async {
             let dst, gen = taskGenerators[generatorId] 
@@ -271,6 +278,7 @@ let interpret (s : State) (stmts : Statement list) =
 
 let evaluate (s : State) (stmts : list<Statement>) : bool =
     let oldStore = s.getStore()
+    let oldActorStore = s.getActorStore()
     try
         for stmt in stmts do
             evaluateStmt s stmt
@@ -279,6 +287,7 @@ let evaluate (s : State) (stmts : list<Statement>) : bool =
     with
     | FlowException _ ->
         s.setStore(oldStore)
+        s.setActorStore(oldActorStore)
         false
         
 // Returns true iff the body of the event was evaluated
@@ -437,6 +446,7 @@ let resolveSrc (s : State) (f : Locator -> Locator) (loc : Locator) : Locator =
 let sendToDst (s : State) (loc : Locator) (value : Locator) =
     match loc with
     | Stdin -> raise (Exception("Can't use `stdin` as a destination!"))
+    | Stdout -> printf "%A" value // TODO: Make pretty printer
     | This -> s.receive("this", value)
     | VarDef name ->
         s.newVar(name)
@@ -455,6 +465,10 @@ let sendToDst (s : State) (loc : Locator) (value : Locator) =
     | StrLit _ -> raise (Exception("Can't use a string as a destination!"))
     | BoolLit _ -> raise (Exception("Can't use a boolean as a destination!"))
     | Unify loc -> tryUnify loc value
+    | Consume ->
+        match value with
+        | ActorRef ref -> s.consumeActor(ref)
+        | _ -> ()
     | LocatorList xs ->
         match value with
         | LocatorList ys ->

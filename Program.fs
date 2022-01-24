@@ -91,5 +91,14 @@ let debugProgram (filename : string) =
         printfn $"State: %A{state.ToString()}"
     | x -> printfn "Error"
     
+let runProgram (filename : string) = 
+    match Parser.program (System.IO.File.ReadAllText filename) with
+    | Some (leftover, program) when leftover = "" ->
+        let state = Interpreter.State()
+        Interpreter.interpret state program
+    | x -> printfn "Error"
+    
 debugProgram "test.psa"
-debugProgram "unify_test.psa"
+debugProgram "unify-test.psa"
+
+runProgram "hello-world.psa"
