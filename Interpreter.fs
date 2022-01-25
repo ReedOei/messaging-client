@@ -7,10 +7,7 @@ open Parser
 
 let concatMap f xs = List.concat (List.map f xs)
     
-let flowSrc (flow : Flow) =
-    match flow with
-    | SimpleFlow (src, dst) -> src
-    | TransformerFlow (src, transformer, dst) -> src
+let flowSrc ((src, dst) : Flow) = src
 
 let defaultVal (typ : PsaType) : Locator =
     match typ with
@@ -175,9 +172,8 @@ type State() =
                     let now = uint64 (DateTime.Now.ToFileTime())
                     fields <- fields.Add("output", LocatorList (out @ [NatLit now]))
                     triggered <- true
-                | _ -> failwith "Expected Clock input and output to be LocatorLists."
-            else
-                ()
+                | LocatorList [], _ -> ()
+                | x, y -> failwith $"Unexpected Clock input and output, got: {x} and {y}"
         | _ ->
             let wasTriggered, newFields = actorTypes[actorType].trigger(this, fieldName, fields)
             triggered <- wasTriggered
@@ -221,18 +217,17 @@ type State() =
         | value -> f value
     
     member this.take(name : string, f : Locator -> Locator) =
-        let result = match store[name] with
-                     | ActorRef ref ->
-                         let actorType, fields = actorStore[ref]
-                         let value = fields["output"]
-                         let newFields = fields.Change("output", Option.map (fun cur -> remove cur (f cur)))
-                         actorStore <- actorStore.Change(ref, Option.map (fun _ -> ActorVal (actorType, newFields)))
-                         
-                         f value
-                     | value ->
-                         store <- store.Change(name, Option.map (fun cur -> remove cur (f cur)))
-                         f value
-        result
+        match store[name] with
+        | ActorRef ref ->
+            let actorType, fields = actorStore[ref]
+            let value = fields["output"]
+            let newFields = fields.Change("output", Option.map (fun cur -> remove cur (f cur)))
+            actorStore <- actorStore.Add(ref, ActorVal (actorType, newFields))
+            
+            f value
+        | value ->
+            store <- store.Change(name, Option.map (fun cur -> remove cur (f cur)))
+            f value
         
     member this.receive(name : string, value : Locator) =
         let receiveValue (loc : Locator) =
@@ -282,7 +277,7 @@ type State() =
         | None -> false
         | Some (generatorId, dst, generatedValue) ->
             this.generateBackgroundTask(generatorId, generatedValue)
-            evaluateFlow this (SimpleFlow (generatedValue, VarRef dst))
+            evaluateFlow this (generatedValue, Destination (VarRef dst))
             true
         
 let interpret (s : State) (stmts : Statement list) =
@@ -334,11 +329,12 @@ let evaluateStmt (s : State) (stmt : Statement) =
     | SimpleEvent (name, trigger, body) -> ()
     | ChainedEvent (name, trigger, children) -> ()
     
-let evaluateFlow (s : State) (flow : Flow) =
+let evaluateFlow (s : State) ((src, chained) : Flow) = evaluateChainedFlow s chained (resolveSrc s id src)
+        
+let rec evaluateChainedFlow (s : State) (flow : ChainedFlow) (value : Locator) =
     match flow with
-    | SimpleFlow (src, dst) -> sendToDst s dst (resolveSrc s id src)
-    | TransformerFlow (src, tr, dst) ->
-        sendToDst s dst (transform s tr (resolveSrc s id src))
+    | Destination dst -> sendToDst s dst value
+    | TransformerFlow (tr, chained) -> evaluateChainedFlow s chained (transform s tr value)
         
 let transform (s : State) (tr : Transformer) (value : Locator) : Locator =
     match tr with
@@ -509,6 +505,7 @@ let tryUnify (a : Locator) (b : Locator) =
     | LocatorStream xs, LocatorStream ys -> List.iter2 tryUnify xs ys
     | _ -> raise (FlowException($"Could not unify {a} and {b}"))
     
+let flattenLocs : Locator list -> Locator = List.fold combine Nothing 
 let combine (a : Locator) (b : Locator) : Locator =
     match a, b with
     | IntLit n, IntLit m -> IntLit (n + m)
@@ -521,11 +518,19 @@ let combine (a : Locator) (b : Locator) : Locator =
     | LocatorStream xs, LocatorStream ys -> LocatorStream (xs @ ys)
     | LocatorList xs, x -> LocatorList (xs @ [x])
     | LocatorStream xs, x -> LocatorStream (xs @ [x])
+    | IntLit n, LocatorList xs -> combine (IntLit n) (flattenLocs xs) 
+    | NatLit n, LocatorList xs -> combine (NatLit n) (flattenLocs xs) 
+    | StrLit s, LocatorList xs -> combine (StrLit s) (flattenLocs xs) 
+    | BoolLit b, LocatorList xs -> combine (BoolLit b) (flattenLocs xs) 
+    | IntLit n, LocatorStream xs -> combine (IntLit n) (flattenLocs xs) 
+    | NatLit n, LocatorStream xs -> combine (NatLit n) (flattenLocs xs) 
+    | StrLit s, LocatorStream xs -> combine (StrLit s) (flattenLocs xs) 
+    | BoolLit b, LocatorStream xs -> combine (BoolLit b) (flattenLocs xs) 
     | x, Uninitialized -> x
     | x, Nothing -> x
     | Uninitialized, x -> x
     | Nothing, x -> x
-    | _ -> Uninitialized
+    | x, y -> failwith $"Cannot combine {x} and {y}"
     
 let rec removeElem (xs : 'a list) (x : 'a) : 'a list =
     match xs with

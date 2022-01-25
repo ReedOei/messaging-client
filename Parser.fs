@@ -12,8 +12,12 @@ type ParserBuilder() =
         | Some(rest, a) -> f a rest
         
     member this.Return(x : 'a) : Parser<'a> = fun s -> Some(s, x)
+    
+    member this.Zero(u : unit) : Parser<'a> = failNow
 
 let parser = ParserBuilder()
+
+let failNow : Parser<'a> = fun _ -> None
 
 let char (c : char) : Parser<char> = fun s ->
     if s.StartsWith(c) then
@@ -92,8 +96,6 @@ let newlineSymbol (p : Parser<'a>) : Parser<'a> = parser {
     let! _ = many wsNewline
     return value
 }
-
-let failNow : Parser<'a> = fun _ -> None
 
 let oneOf (chars : string) : Parser<char> = fun s ->
     let mutable res = None
@@ -213,9 +215,11 @@ type Transformer =
     | TransformerCall of string * Locator list
     | ChainedLoc of Locator
     
-type Flow =
-    | SimpleFlow of Locator * Locator
-    | TransformerFlow of Locator * Transformer * Locator
+type ChainedFlow =
+    | Destination of Locator
+    | TransformerFlow of Transformer * ChainedFlow
+    
+type Flow = Locator * ChainedFlow
 
 type Statement =
     | Actor of string * PsaType * PsaType * list<Statement>
@@ -330,8 +334,8 @@ let chainedLoc : Parser<Transformer> = parser {
 
 let transformer : Parser<Transformer> =
     startActor
-    <|> transformerCall
     <|> chainedLoc
+    <|> transformerCall
 
 let basicLocator : Parser<Locator> =
     (symbol (string "consume") |>> Consume)
@@ -403,53 +407,50 @@ let locator : Parser<Locator> =
     <|> combineLoc
     <|> selectLoc
     <|> selectQuant
-    
-let simpleFlow : Parser<Flow> = parser {
-    let! src = locator
+
+let flowSrcSimple : Parser<Transformer> = parser {
+    let! src = transformer
     let! _ = symbol (string "-->")
-    let! dst = locator
-    let! _ = newlines
-    return SimpleFlow (src, dst)
+    return src
 }
 
-let selectLocFlow : Parser<Flow> = parser {
-    let! src = locator
-    let! _ = symbol (string "--[")
-    let! filter = locator
-    let! _ = symbol (string "]->" <|> string "]-->")
-    let! dst = locator
-    let! _ = newlines
-    return SimpleFlow (Select (src, filter), dst)
-}
-
-let selectQuantFlow : Parser<Flow> = parser {
+let flowSrcSelQuant : Parser<Transformer> = parser {
     let! src = locator
     let! _ = symbol (string "--[")
     let! quant = typeQuant
     let! _ = symbol (string "]->" <|> string "]-->")
-    let! dst = locator
-    let! _ = newlines
-    return SimpleFlow (SelectQuant (src, quant), dst)
+    return ChainedLoc (SelectQuant (src, quant))
 }
 
-let basicFlow : Parser<Flow> =
-    simpleFlow
-    <|> selectLocFlow
-    <|> selectQuantFlow
-    
-let transformerFlow : Parser<Flow> = parser {
+let flowSrcSel : Parser<Transformer> = parser {
     let! src = locator
-    let! _ = symbol (string "-->")
-    let! trans = transformer
-    let! _ = symbol (string "-->")
-    let! dst = locator
-    let! _ = newlines
-    return TransformerFlow (src, trans, dst)
+    let! _ = symbol (string "--[")
+    let! sel = locator
+    let! _ = symbol (string "]->" <|> string "]-->")
+    return ChainedLoc (Select (src, sel))
 }
+
+let flowSrc : Parser<Transformer> =
+    flowSrcSimple
+    <|> flowSrcSel
+    <|> flowSrcSelQuant
+
+let rec buildChainedFlow (dst : Locator) (trs : Transformer list) : ChainedFlow =
+    match trs with
+    | [] -> Destination dst
+    | tr :: rest -> TransformerFlow (tr, buildChainedFlow dst rest)
+
+let flow : Parser<Flow> = parser {
+    let! srcs = some flowSrc |>>= List.ofSeq
+    let! dst = locator
     
-let flow : Parser<Flow> =
-    transformerFlow
-    <|> basicFlow
+    match srcs with
+    | ChainedLoc srcLoc :: rest ->
+        return Flow (srcLoc, buildChainedFlow dst rest)
+    | x ->
+        let! err = failNow
+        return err
+}
 
 let simpleEvent : Parser<Statement> = parser {
     let! _ = symbol (string "event")
@@ -534,7 +535,7 @@ let toFieldDef (vdef : Locator) : Statement =
     | _ -> FieldDef "" // This can't happen because of how the function is called (c.f., `statement`), so this can be whatever.
 
 let statement : Parser<Statement> =
-    (flow |>>= FlowStmt)
+    (withNewlines flow |>>= FlowStmt)
     <|> (withNewlines varDefWithType |>>= toFieldDef)
     <|> (withNewlines varDefNoType |>>= toFieldDef)
     <|> event
