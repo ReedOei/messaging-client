@@ -89,14 +89,14 @@ let debugProgram (filename : string) =
         let state = Interpreter.State()
         Interpreter.interpret state program
         printfn $"State: %A{state.ToString()}"
-    | x -> printfn "Error"
+    | x -> printfn "Parse error"
     
 let runProgram (filename : string) = 
     match Parser.program (System.IO.File.ReadAllText filename) with
     | Some (leftover, program) when leftover = "" ->
         let state = Interpreter.State()
         Interpreter.interpret state program
-    | x -> printfn "Error"
+    | x -> printfn "Parse error"
     
 printfn "%A" (Parser.program "[0] --> start Naturals --> var nats : Naturals")
     

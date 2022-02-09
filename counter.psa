@@ -1,18 +1,14 @@
-actor Counter receives nat {
+actor Counter receives list string {
+    var name : string
     var events : list nat
     
     event Tick on {
-        input --[ 1 ]-> consume
+        input --[ "click" ]-> consume
     } do {
         [] --> start Clock --> var clock : Clock
-        "timestamp" --> clock --> var tick : nat
-        
-        "tick: " --> stdout
-        copy(tick) --> stdout
-        
-        tick --> events
+        "timestamp" --> clock --> events
     }
 }
 
-[[]] --> start Counter --> var counter : Counter
-1 --> counter
+["test", []] --> start Counter --> var counter : Counter
+"click" --> counter
